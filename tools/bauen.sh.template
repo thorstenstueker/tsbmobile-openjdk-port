@@ -1,0 +1,124 @@
+#!/bin/zsh
+# Baut die Probe-APK und spielt sie auf das angeschlossene Geraet.
+#
+# Warum als Skript und nicht als Befehlsfolge im Protokoll: der Weg ist sechs
+# Schritte lang, und beim ersten verlorenen Werkzeugaufruf war unklar, ob die
+# APK den neuen Stand enthaelt oder den alten. Ein Skript beantwortet das, indem
+# man es noch einmal laufen laesst.
+#
+#   ./bauen.sh          baut, spielt auf und startet
+#   ./bauen.sh nurbau   baut nur
+set -e
+
+HIER=${0:a:h}
+cd "$HIER"
+
+# Geschweifte Klammern um jede Variable, auf die ein ":" folgt. zsh liest sonst das
+# Naechste als History-Modifikator: aus "$PLATTFORM:flatlaf.jar" wird
+# ".../android.jaratlaf.jar" — ":f" heisst "wiederhole", "l" heisst "klein schreiben".
+# Auch in Anfuehrungszeichen. Der Fehler sieht danach aus, als fehle die Bibliothek.
+A=~/Library/Android/sdk
+WZ=$A/build-tools/36.0.0
+PLATTFORM=$A/platforms/android-36/android.jar
+ADB=$A/platform-tools/adb
+
+# Port-Naehte, die nach S1 dazugekommen sind. Sie gehoeren zu desktop8-android.jar, liegen
+# aber ausserhalb: den Port neu zu bauen kostet einen Durchgang durch Entnativisierer und
+# Umbenenner, und eine Klasse mehr im Dex tut dasselbe. Die Quelle bleibt bei den anderen
+# Naehten in s1-portgroesse/patch, damit sie nicht an zwei Orten steht.
+# Als Feld, nicht als Zeichenkette: zsh splittet unquotierte Variablen NICHT, aus zwei
+# Pfaden in einer Variablen wird ein Dateiname mit Zeilenumbruch darin.
+NAHTQUELLE=../s1-portgroesse/patch
+
+# Ausdruecklich aufgezaehlt, nicht "alles unter patch/". Grund: TsbToolkit verweist auf
+# java.awt.font.TextAttribute, und der Umbenenner hat das nach tsb.port.TextAttribute
+# verschoben — die Quelle passt nicht mehr zu dem Jar, in das sie zurueck soll. Wer eine
+# solche Naht aendert, muss sie durch den Umbenenner schicken, nicht hier eintragen.
+NAEHTE=(
+  ${NAHTQUELLE}/tsb/port/Zeichenwerk.java
+  ${NAHTQUELLE}/tsb/port/Portgrafik.java
+  ${NAHTQUELLE}/tsb/port/Leerwerk.java
+  ${NAHTQUELLE}/tsb/port/Lader.java
+  ${NAHTQUELLE}/tsb/port/Ortung.java
+  ${NAHTQUELLE}/tsb/port/Bildschirm.java
+  ${NAHTQUELLE}/tsb/port/Textmalen.java
+  ${NAHTQUELLE}/tsb/port/TsbGraphicsEnvironment.java
+  ${NAHTQUELLE}/tsb/port/TsbSchriftverwaltung.java
+  ${NAHTQUELLE}/sun/font/TsbFont2D.java
+)
+
+# 1 — uebersetzen. Der Port steht VOR der Plattform auf dem Pfad, sonst gewinnt
+#     Androids eigenes java.* und javax.swing findet seine Oberklassen nicht.
+#
+#     core-lambda-stubs.jar ist noetig, weil weder android.jar noch der Port ein
+#     java.lang.invoke.LambdaMetafactory haben: Android hat keines (d8 loest
+#     Lambdas selbst auf), und der Port ist auf java.desktop beschnitten. Ohne
+#     die Stubs uebersetzt kein einziges Lambda. Gradle legt sie still dazu.
+# 0 — Die Port-Naehte gehoeren IN den Port, nicht danebengelegt: tsb.port.Portgrafik und
+#     tsb.port.Zeichenwerk stecken in desktop8-fertig.jar, und eine zweite Fassung im Dex
+#     waere eine doppelte Klasse. Also uebersetzen und die Eintraege im Jar ersetzen.
+#     Das ist wiederholbar — jeder Lauf schreibt dieselben Eintraege neu.
+echo "== Naehte in den Port"
+rm -rf naht && mkdir -p naht
+javac -source 8 -target 8 -nowarn \
+      -bootclasspath "desktop8-fertig.jar:$PLATTFORM:$WZ/core-lambda-stubs.jar" \
+      -cp "desktop8-fertig.jar:${PLATTFORM}" \
+      -d naht "${NAEHTE[@]}"
+(cd naht && zip -qr ../desktop8-fertig.jar .)
+echo "   $(find naht -name '*.class' | wc -l | tr -d ' ') Klassen zurueckgespielt"
+
+echo "== javac"
+rm -rf classes && mkdir -p classes
+javac -source 8 -target 8 -nowarn \
+      -bootclasspath "desktop8-fertig.jar:$PLATTFORM:$WZ/core-lambda-stubs.jar" \
+      -cp "desktop8-fertig.jar:${PLATTFORM}:flatlaf-lader.jar" \
+      -d classes $(find src -name '*.java')
+
+# 2 — dexen. Port und Probe in einem Lauf; getrennt zu dexen spart nichts,
+#     weil d8 fuer 4736 Klassen sieben Sekunden braucht.
+echo "== d8"
+rm -rf out && mkdir -p out
+"$WZ/d8" --min-api 26 --lib "$PLATTFORM" --output out \
+    desktop8-fertig.jar flatlaf-lader.jar $(find classes -name '*.class') 2>&1 | tail -3
+
+# 3 — Huelle bauen, 4 — dex hinein
+echo "== aapt2 + zip"
+# Ohne die beiden SDK-Angaben schreibt aapt2 targetSdk 0 in die APK, und das
+# Geraet lehnt sie ab ("must target at least SDK version 24, but found 0").
+"$WZ/aapt2" link -I "$PLATTFORM" --manifest AndroidManifest.xml \
+    --min-sdk-version 26 --target-sdk-version 36 \
+    -o roh.apk --auto-add-overlay
+(cd out && zip -q ../roh.apk classes.dex)
+
+# Beide Jars sind zweimal umgeschrieben worden — einmal ist nicht genug:
+#   Umbenenner    java.beans -> tsb.port.beans   (Androids java.beans ist eine Teilmenge)
+#   Laderwechsel  ClassLoader.getSystemClassLoader() -> tsb.port.Lader.system()
+#                 18 Stellen im Port, 1 in FlatLaf. Androids Systemlader sieht die APK nicht.
+# Beide Werkzeuge liegen hier; die Aufrufe stehen im README.
+#
+# FlatLaf muss durch denselben Umzug wie der Port: es ruft java.beans, das der Port
+# nach tsb.port.beans verschoben hat (Androids eigenes java.beans ist eine Teilmenge).
+# Ohne den Umzug: NoSuchMethodError addPropertyChangeListener(String, java.beans.*).
+# Erzeugt mit: java -cp .:asm:asm-commons Umbenenner flatlaf.jar flatlaf-android.jar
+#
+# FlatLaf liest sein Aussehen aus .properties-Dateien, nicht aus Java-Code. Ohne sie
+# startet es und faellt auf leere Vorgaben zurueck. Die APK ist ein Zip auf dem
+# Klassenpfad, also findet getResourceAsStream sie unter demselben Pfad wie im Jar.
+echo "== FlatLafs Eigenschaftsdateien"
+rm -rf mittel && mkdir -p mittel
+(cd mittel && unzip -q ../flatlaf.jar 'com/*' -x '*.class' && zip -qr ../roh.apk com)
+echo "   $(find mittel -name '*.properties' | wc -l | tr -d ' ') Dateien"
+
+# 5 — ausrichten, 6 — unterschreiben
+echo "== zipalign + apksigner"
+rm -f fertig.apk
+"$WZ/zipalign" -p 4 roh.apk fertig.apk
+"$WZ/apksigner" sign --ks ~/.android/debug.keystore \
+    --ks-pass pass:android --key-pass pass:android fertig.apk
+
+echo "== fertig: $(du -h fertig.apk | cut -f1)"
+[[ "$1" == "nurbau" ]] && exit 0
+
+echo "== aufspielen"
+"$ADB" install -r fertig.apk
+"$ADB" shell am start -n tsb.swingprobe/tsb.probe.HauptActivity
