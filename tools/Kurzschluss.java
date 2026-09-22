@@ -91,6 +91,9 @@ public final class Kurzschluss {
      */
     private static final java.util.Map<String, List<Regel>> SAETZE = new java.util.LinkedHashMap<>();
 
+    private static final String FONT_GRUND = "Font misst ueber FontDesignMetrics in sun.font; "
+            + "auf dem Telefon misst die Plattform, siehe tsb.port.Schrift.";
+
     private static final List<Regel> PORT = List.of(
             new Regel("sun/font/FontUtilities", "fontSupportsDefaultEncoding",
                     "(Ljava/awt/Font;)Z", "true",
@@ -138,8 +141,40 @@ public final class Kurzschluss {
                     "Sucht ein Window und wirft sonst ausdruecklich einen Error. Gebraucht "
                             + "wird es, solange ein Aufklappmenue offen ist: jede Bewegung "
                             + "fragt, ueber welchem Eintrag der Finger steht. Ohne Fenster ist "
-                            + "die Umrechnung die Summe der Positionen, andersherum.")
+                            + "die Umrechnung die Summe der Positionen, andersherum."),
+
+            // JDK 17: java.awt.Font misst selbst — ueber FontDesignMetrics nach sun.font, wo
+            // StrikeCache Unsafe braucht. Gemessen auf Android 14: PlainView.updateMetrics →
+            // Font.getStringBounds → SunFontManager → NoSuchMethodError Unsafe.getUnsafe.
+            // Im JDK-8-Port kam Swing hier nicht vorbei; jetzt tut es das bei jedem Textfeld.
+            // Alle neun Messmethoden gehen an tsb.port.Schrift, dieselbe Metrik wie ueberall.
+            new Regel("java/awt/Font", "getStringBounds",
+                    "(Ljava/lang/String;IILjava/awt/font/FontRenderContext;)Ljava/awt/geom/Rectangle2D;",
+                    "-> tsb/port/Schrift.grenzen", FONT_GRUND),
+            new Regel("java/awt/Font", "getStringBounds",
+                    "([CIILjava/awt/font/FontRenderContext;)Ljava/awt/geom/Rectangle2D;",
+                    "-> tsb/port/Schrift.grenzen", FONT_GRUND),
+            new Regel("java/awt/Font", "getStringBounds",
+                    "(Ljava/text/CharacterIterator;IILjava/awt/font/FontRenderContext;)Ljava/awt/geom/Rectangle2D;",
+                    "-> tsb/port/Schrift.grenzen", FONT_GRUND),
+            new Regel("java/awt/Font", "getMaxCharBounds",
+                    "(Ljava/awt/font/FontRenderContext;)Ljava/awt/geom/Rectangle2D;",
+                    "-> tsb/port/Schrift.maxGrenzen", FONT_GRUND),
+            new Regel("java/awt/Font", "getLineMetrics",
+                    "(Ljava/lang/String;Ljava/awt/font/FontRenderContext;)Ljava/awt/font/LineMetrics;",
+                    "-> tsb/port/Schrift.zeilenmass", FONT_GRUND),
+            new Regel("java/awt/Font", "getLineMetrics",
+                    "(Ljava/lang/String;IILjava/awt/font/FontRenderContext;)Ljava/awt/font/LineMetrics;",
+                    "-> tsb/port/Schrift.zeilenmass", FONT_GRUND),
+            new Regel("java/awt/Font", "getLineMetrics",
+                    "([CIILjava/awt/font/FontRenderContext;)Ljava/awt/font/LineMetrics;",
+                    "-> tsb/port/Schrift.zeilenmass", FONT_GRUND),
+            new Regel("java/awt/Font", "getLineMetrics",
+                    "(Ljava/text/CharacterIterator;IILjava/awt/font/FontRenderContext;)Ljava/awt/font/LineMetrics;",
+                    "-> tsb/port/Schrift.zeilenmass", FONT_GRUND)
     );
+
+
 
     private static final List<Regel> FLATLAF = List.of(
             new Regel("com/formdev/flatlaf/util/JavaCompatibility", "drawStringUnderlineCharAt",
@@ -241,31 +276,31 @@ public final class Kurzschluss {
     }
 
     /**
-     * Ein Rumpf, der nur weiterreicht: {@code return Ziel.methode(this);}
+     * Ein Rumpf, der nur weiterreicht: {@code return Ziel.methode(this, a, b, …);}
      *
-     * <p>Nur fuer Methoden ohne Parameter — mehr wurde bisher nicht gebraucht, und eine
-     * allgemeine Fassung waere Code fuer einen Fall, den es nicht gibt.
+     * <p>Bis zum JDK-17-Port nur fuer Instanzmethoden ohne Parameter; seitdem mit allen
+     * Parametern, weil {@code Font.getStringBounds(String, int, int, FontRenderContext)}
+     * welche hat. Bei einer statischen Methode sind die Parameter schon alles, was das Ziel
+     * braucht; bei einer Instanzmethode kommt "this" davor, und die Signatur des Ziels
+     * bekommt den Empfaengertyp vorangestellt.
      */
     private static void schreibeWeiterleitung(MethodVisitor m, String klasse, String signatur,
                                               Regel regel, boolean statisch) {
         Type rueck = Type.getReturnType(signatur);
         Type[] parameter = Type.getArgumentTypes(signatur);
 
-        // Bei einer statischen Methode ist der erste Parameter schon das, was das Ziel
-        // braucht; bei einer Instanzmethode ist es "this", und die Signatur des Ziels bekommt
-        // den Empfaengertyp vorangestellt.
-        String zielSignatur = statisch ? signatur : "(L" + klasse + ";)" + rueck.getDescriptor();
+        String zielSignatur = statisch ? signatur
+                : "(L" + klasse + ";" + signatur.substring(1);
 
         m.visitCode();
         int platz = 0;
         if (!statisch) {
             m.visitVarInsn(Opcodes.ALOAD, 0);
             platz = 1;
-        } else {
-            for (Type p : parameter) {
-                m.visitVarInsn(p.getOpcode(Opcodes.ILOAD), platz);
-                platz += p.getSize();
-            }
+        }
+        for (Type p : parameter) {
+            m.visitVarInsn(p.getOpcode(Opcodes.ILOAD), platz);
+            platz += p.getSize();
         }
         m.visitMethodInsn(Opcodes.INVOKESTATIC, regel.zielBesitzer(), regel.zielName(),
                 zielSignatur, false);

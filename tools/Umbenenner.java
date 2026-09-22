@@ -85,6 +85,26 @@ public final class Umbenenner {
         UMZUEGE.put("java/beans/", "tsb/port/beans/");
         UMZUEGE.put("sun/security/util/SecurityConstants", "tsb/port/SecurityConstants");
         UMZUEGE.put("java/awt/font/TextAttribute", "tsb/port/TextAttribute");
+
+        // JDK 17: das Modul, das es auf dem Telefon nicht gibt. Modulfrei hat die Aufrufe
+        // (Class.getModule, ResourceBundle.getBundle(…, Module), …) schon auf tsb.port.Modul
+        // umgeschrieben; hier ziehen die restlichen Nennungen des Typs nach — Felder,
+        // lokale Variablen, Parameter, Rahmen. Genau der Name, nicht das Praefix: ModuleLayer
+        // und ModuleDescriptor bleiben, was sie sind (und werden nicht gebraucht).
+        UMZUEGE.put("java/lang/Module", "tsb/port/Modul");
+
+        // JDK 17: sun.security.action.GetPropertyAction & Co. gibt es auf beiden Telefonen —
+        // in der Fassung ohne die statischen privilegedGetProperty seit 9. Der Bootclasspath
+        // gewinnt, also wuerde unsere mitgelieferte Fassung nie geladen: gemessen auf dem
+        // iPhone-Simulator, "Could not initialize class sun.awt.SunToolkit". Das ganze Paket.
+        UMZUEGE.put("sun/security/action/", "tsb/port/action/");
+
+        // JDK 17: TextAttribute setzt in seinem statischen Initialisierer den Font-Zugang
+        // ueber eine paketprivate Nachbarklasse. Nach dem Umzug von TextAttribute nach
+        // tsb.port ist der Nachbar nicht mehr im selben Paket — IllegalAccessError, gemessen
+        // auf Android 14 als "Illegal class access: tsb.port.TextAttribute attempting to
+        // access java.awt.font.JavaAWTFontAccessImpl". Also zieht der Nachbar mit um.
+        UMZUEGE.put("java/awt/font/JavaAWTFontAccessImpl", "tsb/port/JavaAWTFontAccessImpl");
     }
 
     public static void main(String[] args) throws IOException {
