@@ -49,6 +49,29 @@ JTable, JComboBox) work on Android.
 FlatLaf for Android (`flatlaf-android-*.jar`) goes through steps 4 and 5 as well. FlatLaf is Apache-2.0
 licensed, and this sentence is the notice of that modification.
 
+## What the port cannot do — read before writing a form
+
+The port is `java.desktop` without its native half. A Swing program on a phone may use every
+component, layout manager, FlatLaf theme and `Graphics2D` call; it may not use:
+
+- **windows**: `JFrame`, `JDialog`, `JWindow`, window-bound `JOptionPane`; there is one view, the
+  screen. Popups and menus are drawn inside it (`Kurzschluss` rules on `SwingUtilities.getRoot`,
+  `PopupFactory$ContainerPopup.fitsOnScreen`, `Component.getLocationOnScreen_NoTreeLock`).
+- **`sun.font` and the `java2d` pipelines**: `Font.getStringBounds`, `getLineMetrics`,
+  `getMaxCharBounds` and `FontMetrics` are answered by the platform through `tsb.port.Schrift`
+  (exact widths, estimated underline/strikethrough thickness); `Font.createGlyphVector`,
+  `TextLayout`, `LineBreakMeasurer`, `AttributedString` rendering reach a native method and throw
+  `UnsatisfiedLinkError: tsbMobile: … braucht einen Unterbau` — that message names the method.
+- printing, clipboard, drag and drop, `Desktop`, `SystemTray`, `Robot`, `Toolkit.getImage(URL)`.
+- `java.lang.Module`: every `Class.getModule()` answers the one unnamed `tsb.port.Modul`;
+  `System.loadLibrary` does nothing; `Thread(…, inheritThreadLocals)` loses its fifth argument.
+- On Android `java.version` is `"0"` and unchangeable; FlatLaf therefore uses its Java 8 path, for
+  which `SwingUtilities2.AA_TEXT_PROPERTY_KEY`/`AATextInfo` exist here as a shim.
+
+What the phones must provide (Android 14 has it; the RoboVM fork since release `3.0.0-tsb.20260922.2`):
+`java.lang.ref.Cleaner`, `Executable.getParameterCount`, the limited `AccessController.doPrivileged`,
+`MalformedParameterizedTypeException(String)`.
+
 ## History: the JDK 8 port (until 22.09.2026)
 
 The port did not come out of a compiler run over the OpenJDK sources but out of four rewrites of the compiled
